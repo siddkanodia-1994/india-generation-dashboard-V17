@@ -3,6 +3,7 @@ import { Tabs, TabList, Tab, TabPanel } from "react-tabs";
 import "react-tabs/style/react-tabs.css";
 import ElectricityDashboard from "./ElectricityDashboard";
 import RatedCapacity from "./RatedCapacity";
+import LatestNews from "./LatestNews";
 
 export default function App() {
   return (
@@ -19,6 +20,7 @@ export default function App() {
               <Tab>Coal PLF</Tab>
               <Tab>RTM Prices</Tab>
               <Tab>Rated Capacity</Tab>
+              <Tab>Latest News</Tab>
             </TabList>
           </div>
 
@@ -28,35 +30,30 @@ export default function App() {
               title="India Electricity Generation Dashboard"
               subtitle="Daily generation data, trends, and YoY/MoM analytics"
               seriesLabel="Generation"
-              // ✅ Units explicitly MU for Generation
               unitLabel="MU"
               valueColumnKey="generation_gwh"
               defaultCsvPath="/data/generation.csv"
               enableAutoFetch={true}
               calcMode="sum"
               valueDisplay={{
-                // ✅ All display strings show MU
                 suffix: " MU",
                 decimals: 2,
               }}
             />
           </TabPanel>
 
-          {/* ✅ ONLY THIS TAB UPDATED: Peak Demand Met units MU -> GW */}
           <TabPanel>
             <ElectricityDashboard
               type="demand"
               title="India Peak Demand Met Dashboard"
               subtitle="Daily peak demand met data (GW), trends, and YoY/MoM analytics"
               seriesLabel="Peak Demand Met"
-              // ✅ Peak demand is instantaneous POWER, not energy → GW
               unitLabel="GW"
               valueColumnKey="demand_gwh"
               defaultCsvPath="/data/Peak Demand.csv"
               enableAutoFetch={false}
               calcMode="avg"
               valueDisplay={{
-                // ✅ All display strings show GW
                 suffix: " GW",
                 decimals: 2,
               }}
@@ -69,14 +66,12 @@ export default function App() {
               title="India Electricity Supply Dashboard"
               subtitle="Daily supply data, trends, and YoY/MoM analytics"
               seriesLabel="Supply"
-              // ✅ Units explicitly MU for Supply
               unitLabel="MU"
               valueColumnKey="supply_gwh"
               defaultCsvPath="/data/supply.csv"
               enableAutoFetch={false}
               calcMode="sum"
               valueDisplay={{
-                // ✅ All display strings show MU
                 suffix: " MU",
                 decimals: 2,
               }}
@@ -91,7 +86,6 @@ export default function App() {
               seriesLabel="Coal PLF"
               unitLabel="%"
               valueColumnKey="coal_plf"
-              // IMPORTANT: file has space in name
               defaultCsvPath="/data/Coal PLF.csv"
               enableAutoFetch={false}
               calcMode="avg"
@@ -122,6 +116,10 @@ export default function App() {
 
           <TabPanel>
             <RatedCapacity />
+          </TabPanel>
+
+          <TabPanel>
+            <LatestNews />
           </TabPanel>
         </Tabs>
       </div>
