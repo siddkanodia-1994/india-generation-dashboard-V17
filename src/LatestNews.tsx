@@ -5,13 +5,12 @@ type NewsItem = {
   title: string;
   url: string;
   source: string;
-  publishedAtISO: string; // ISO string
+  publishedAtISO: string;
   snippet: string;
 };
 
-const CACHE_KEY = "latestNews_cache_v2";
+const CACHE_KEY = "latestNews_cache_v3";
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
-
 const DEFAULT_FROM = "2021-01-01";
 
 const POWER_TERMS = [
@@ -20,7 +19,7 @@ const POWER_TERMS = [
   "grid",
   "demand",
   "supply",
-  "peak demand",
+  "peak",
   "renewable",
   "solar",
   "wind",
@@ -28,7 +27,6 @@ const POWER_TERMS = [
   "plf",
   "transmission",
   "discom",
-  "tariff",
   "energy",
 ];
 
@@ -36,317 +34,216 @@ function todayISODate() {
   return new Date().toISOString().slice(0, 10);
 }
 
-function formatDDMMYYYY(isoOrDate: string) {
-  const d = new Date(isoOrDate);
+function formatDDMMYYYY(iso: string) {
+  const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  const dd = String(d.getDate()).padStart(2, "0");
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const yyyy = d.getFullYear();
-  return `${dd}/${mm}/${yyyy}`;
+  return `${String(d.getDate()).padStart(2, "0")}/${String(
+    d.getMonth() + 1
+  ).padStart(2, "0")}/${d.getFullYear()}`;
 }
 
-function clampText(s: string, max = 180) {
-  const t = (s || "").replace(/\s+/g, " ").trim();
-  if (!t) return "";
-  return t.length <= max ? t : t.slice(0, max - 1) + "…";
-}
-
-function safeLower(s: string) {
-  return (s || "").toLowerCase();
+function clamp(text = "", n = 180) {
+  return text.length <= n ? text : text.slice(0, n) + "…";
 }
 
 function isRelevant(item: NewsItem) {
-  const hay = safeLower(`${item.title} ${item.snippet} ${item.source}`);
-  const mentionsIndia = hay.includes("india") || hay.includes("indian");
-  const mentionsPower = POWER_TERMS.some((t) => hay.includes(t));
-  return mentionsIndia && mentionsPower;
+  const hay = `${item.title} ${item.snippet} ${item.source}`.toLowerCase();
+  return (
+    (hay.includes("india") || hay.includes("indian")) &&
+    POWER_TERMS.some((t) => hay.includes(t))
+  );
 }
 
-function loadCache(): { ts: number; items: NewsItem[] } | null {
+function loadCache(): NewsItem[] | null {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return null;
     const obj = JSON.parse(raw);
-    if (!obj || typeof obj !== "object") return null;
-    if (typeof obj.ts !== "number" || !Array.isArray(obj.items)) return null;
-    return obj;
+    if (Date.now() - obj.ts > CACHE_TTL_MS) return null;
+    return obj.items;
   } catch {
     return null;
   }
 }
 
 function saveCache(items: NewsItem[]) {
-  try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), items }));
-  } catch {
-    // ignore
-  }
+  localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), items }));
 }
 
-async function fetchViaGoogleNewsRSS(): Promise<NewsItem[]> {
-  // Google News RSS query focused on Indian power sector
-  const rssUrl =
+async function fetchGoogleNewsRSS(): Promise<NewsItem[]> {
+  const rss =
     "https://news.google.com/rss/search?q=" +
     encodeURIComponent(
-      `(India power sector OR India electricity OR India power demand OR India power supply OR India peak demand OR India renewable energy OR India grid OR India discom OR India transmission)`
+      "(India power sector OR India electricity OR India power demand OR India grid OR India renewable energy)"
     ) +
     "&hl=en-IN&gl=IN&ceid=IN:en";
 
-  // Use Jina AI proxy to avoid CORS in browser
-  const proxyUrl = `https://r.jina.ai/http://` + rssUrl.replace(/^https?:\/\//, "");
+  // ✅ AllOrigins proxy (browser-safe)
+  const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(rss)}`;
 
-  const res = await fetch(proxyUrl);
-  if (!res.ok) throw new Error(`RSS HTTP ${res.status}`);
-  const text = await res.text();
+  const res = await fetch(proxy);
+  if (!res.ok) throw new Error("RSS fetch failed");
 
-  // Parse XML (RSS)
-  const parser = new DOMParser();
-  const xml = parser.parseFromString(text, "text/xml");
+  const xmlText = await res.text();
+  const xml = new DOMParser().parseFromString(xmlText, "text/xml");
+  const items = Array.from(xml.querySelectorAll("item"));
 
-  const entries = Array.from(xml.getElementsByTagName("item"));
-  const items: NewsItem[] = entries
-    .map((item, idx) => {
-      const title = item.getElementsByTagName("title")[0]?.textContent?.trim() || "";
-      const link = item.getElementsByTagName("link")[0]?.textContent?.trim() || "";
-      const pubDate = item.getElementsByTagName("pubDate")[0]?.textContent?.trim() || "";
-      const source = item.getElementsByTagName("source")[0]?.textContent?.trim() || "Google News";
+  return items
+    .map((item, i) => {
+      const title = item.querySelector("title")?.textContent || "";
+      const link = item.querySelector("link")?.textContent || "";
+      const pubDate = item.querySelector("pubDate")?.textContent || "";
+      const source = item.querySelector("source")?.textContent || "Google News";
+      const desc = item
+        .querySelector("description")
+        ?.textContent?.replace(/<[^>]+>/g, "") || "";
 
-      // Description is often HTML
-      const descRaw = item.getElementsByTagName("description")[0]?.textContent || "";
-      const desc = descRaw.replace(/<[^>]+>/g, "").trim();
+      const publishedAtISO = pubDate
+        ? new Date(pubDate).toISOString()
+        : "";
 
-      const publishedAtISO = pubDate ? new Date(pubDate).toISOString() : "";
       if (!title || !link || !publishedAtISO) return null;
 
       return {
-        id: `rss_${publishedAtISO}_${idx}`,
+        id: `${publishedAtISO}_${i}`,
         title,
         url: link,
         source,
         publishedAtISO,
-        snippet: clampText(desc, 200),
+        snippet: clamp(desc),
       } as NewsItem;
     })
     .filter(Boolean) as NewsItem[];
-
-  return items;
-}
-
-function Card({
-  title,
-  right,
-  children,
-}: {
-  title: string;
-  right?: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-2xl bg-white shadow-sm ring-1 ring-slate-200">
-      <div className="flex items-start justify-between gap-3 border-b border-slate-100 p-4">
-        <div className="text-sm font-semibold text-slate-800">{title}</div>
-        {right ? <div className="text-sm text-slate-600">{right}</div> : null}
-      </div>
-      <div className="p-4">{children}</div>
-    </div>
-  );
-}
-
-function ExternalIcon() {
-  return (
-    <span className="inline-flex h-5 w-5 items-center justify-center rounded-md bg-slate-100 text-slate-600">
-      ↗
-    </span>
-  );
 }
 
 export default function LatestNews() {
   const [items, setItems] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  // ✅ Keep filter state as ISO (YYYY-MM-DD) so <input type="date"> works
   const [from, setFrom] = useState(DEFAULT_FROM);
   const [to, setTo] = useState(todayISODate());
 
-  const effectiveFrom = from || DEFAULT_FROM;
-  const effectiveTo = to || todayISODate();
-
   const filtered = useMemo(() => {
-    const fromT = new Date(effectiveFrom + "T00:00:00Z").getTime();
-    const toT = new Date(effectiveTo + "T23:59:59Z").getTime();
+    const fromT = new Date(from + "T00:00:00Z").getTime();
+    const toT = new Date(to + "T23:59:59Z").getTime();
 
     return items
-      .filter((x) => {
-        const t = new Date(x.publishedAtISO).getTime();
-        return Number.isFinite(t) && t >= fromT && t <= toT;
+      .filter((n) => {
+        const t = new Date(n.publishedAtISO).getTime();
+        return t >= fromT && t <= toT;
       })
       .sort((a, b) => (a.publishedAtISO < b.publishedAtISO ? 1 : -1));
-  }, [items, effectiveFrom, effectiveTo]);
+  }, [items, from, to]);
 
-  async function loadNews(force = false) {
+  async function load(force = false) {
     setLoading(true);
-    setErr(null);
+    setError(null);
 
     try {
       if (!force) {
-        const cache = loadCache();
-        if (cache && Date.now() - cache.ts < CACHE_TTL_MS) {
-          setItems(cache.items);
+        const cached = loadCache();
+        if (cached) {
+          setItems(cached);
           setLoading(false);
           return;
         }
       }
 
-      const fetched = await fetchViaGoogleNewsRSS();
-
-      // Post-filter relevance
-      const relevant = fetched.filter(isRelevant);
-
-      // Sort newest first and cap at 100
-      relevant.sort((a, b) => (a.publishedAtISO < b.publishedAtISO ? 1 : -1));
-      const limited = relevant.slice(0, 100);
-
-      setItems(limited);
-      saveCache(limited);
+      const raw = await fetchGoogleNewsRSS();
+      const relevant = raw.filter(isRelevant).slice(0, 100);
+      setItems(relevant);
+      saveCache(relevant);
     } catch {
-      setErr("Unable to load news – please try again later");
+      setError("Unable to load news – please try again later");
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    // Fetch on tab load (use 1hr cache)
-    loadNews(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    load(false);
   }, []);
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <div className="mx-auto max-w-7xl px-4 py-8">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+    <div className="mx-auto max-w-7xl px-4 py-8">
+      <div className="flex items-end justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">Latest News</h1>
+          <p className="text-sm text-slate-600">
+            Real-time news focused on the Indian power sector.
+          </p>
+        </div>
+        <button
+          onClick={() => load(true)}
+          className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white"
+        >
+          Refresh
+        </button>
+      </div>
+
+      <div className="mt-6 rounded-2xl bg-white p-4 shadow ring-1 ring-slate-200">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           <div>
-            <div className="text-2xl font-semibold text-slate-900">Latest News</div>
-            <div className="mt-1 text-sm text-slate-600">
-              Real-time news and reports focused on the Indian power sector.
-            </div>
+            <label className="text-xs font-medium">Start date</label>
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              className="mt-1 w-full rounded-xl border px-3 py-2"
+            />
           </div>
-
-          <div className="flex gap-2">
-            <button
-              onClick={() => loadNews(true)}
-              className="rounded-xl bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
-              disabled={loading}
-            >
-              {loading ? "Refreshing…" : "Refresh"}
-            </button>
+          <div>
+            <label className="text-xs font-medium">End date</label>
+            <input
+              type="date"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              className="mt-1 w-full rounded-xl border px-3 py-2"
+            />
+          </div>
+          <div className="flex items-end text-sm text-slate-600">
+            Showing {filtered.length} articles
           </div>
         </div>
+      </div>
 
-        {/* Filter card */}
-        <div className="mt-6">
-          <Card
-            title="Filter"
-            right={
-              <button
-                onClick={() => {
-                  setFrom(DEFAULT_FROM);
-                  setTo(todayISODate());
-                }}
-                className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"
-              >
-                Reset
-              </button>
-            }
+      {error && (
+        <div className="mt-6 rounded-xl bg-rose-50 p-4 text-rose-800">
+          {error}
+          <button
+            onClick={() => load(true)}
+            className="ml-4 rounded bg-slate-900 px-3 py-1 text-white"
           >
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:items-end">
-              <div>
-                <div className="text-xs font-medium text-slate-600">Start date</div>
-                <input
-                  type="date"
-                  value={from}
-                  onChange={(e) => setFrom(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
-                />
-              </div>
-
-              <div>
-                <div className="text-xs font-medium text-slate-600">End date</div>
-                <input
-                  type="date"
-                  value={to}
-                  onChange={(e) => setTo(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
-                />
-              </div>
-
-              <div className="text-sm text-slate-600">
-                Showing <span className="font-semibold text-slate-900">{filtered.length}</span>{" "}
-                articles
-              </div>
-            </div>
-          </Card>
+            Retry
+          </button>
         </div>
+      )}
 
-        {/* Error */}
-        {err ? (
-          <div className="mt-6 rounded-2xl bg-rose-50 p-4 text-rose-800 ring-1 ring-rose-200">
-            <div className="font-semibold">{err}</div>
-            <button
-              onClick={() => loadNews(true)}
-              className="mt-3 rounded-xl bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+      <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {filtered.map((n) => (
+          <div
+            key={n.id}
+            className="rounded-2xl bg-white p-4 shadow ring-1 ring-slate-200"
+          >
+            <a
+              href={n.url}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold hover:underline"
             >
-              Retry
-            </button>
+              {n.title}
+            </a>
+            <div className="mt-1 text-xs text-slate-600">
+              {n.source} • {formatDDMMYYYY(n.publishedAtISO)}
+            </div>
+            <p className="mt-2 text-sm text-slate-700">{n.snippet}</p>
           </div>
-        ) : null}
+        ))}
+      </div>
 
-        {/* Content */}
-        <div className="mt-6">
-          {loading && !items.length ? (
-            <div className="text-sm text-slate-600">Loading news…</div>
-          ) : null}
-
-          {!loading && !err && filtered.length === 0 ? (
-            <div className="text-sm text-slate-600">No articles found for this range.</div>
-          ) : null}
-
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            {filtered.map((a) => (
-              <div
-                key={a.id}
-                className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <a
-                    href={a.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-base font-semibold text-slate-900 hover:underline"
-                  >
-                    {a.title}
-                  </a>
-                  <a href={a.url} target="_blank" rel="noreferrer" title="Open">
-                    <ExternalIcon />
-                  </a>
-                </div>
-
-                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600">
-                  <span className="font-medium">{a.source}</span>
-                  <span>•</span>
-                  <span>{formatDDMMYYYY(a.publishedAtISO)}</span>
-                </div>
-
-                <div className="mt-3 text-sm text-slate-700">{a.snippet}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="mt-6 text-xs text-slate-500">
-          Cached for up to 1 hour to reduce calls. Refresh to fetch latest.
-        </div>
+      <div className="mt-6 text-xs text-slate-500">
+        Cached for up to 1 hour. Refresh to fetch latest.
       </div>
     </div>
   );
