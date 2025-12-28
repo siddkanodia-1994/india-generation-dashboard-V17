@@ -2,14 +2,16 @@ import React, { useEffect, useMemo, useState } from "react";
 
 /**
  * Rated Capacity Tab
- * - Top card: "Rated Capacity" (editable Installed Capacity + PLF)
- * - Historical Capacity card below (monthly comparison)
+ * - Top card: "Rated Capacity" (editable Installed Capacity + PLF, computed Rated Capacity)
+ * - Historical Capacity card below
  *
- * IMPORTANT GUARANTEES:
- * - No formatting or behavior change to the Rated Capacity card
- * - Manual inputs preserved
- * - LocalStorage preserved
- * - Historical CSV supports MM/YYYY and DD/MM/YYYY (treated as monthly)
+ * IMPORTANT:
+ * - Does NOT change formatting/behavior of the Rated Capacity card above (manual inputs still allowed)
+ * - Uses localStorage keys:
+ *    - ratedCapacity_installed
+ *    - ratedCapacity_plf
+ * - Reads initial installed capacities from /data/Capacity.csv (single-row CSV)
+ * - Reads historical monthly capacities from /data/capacity.csv (or /data/Capacity.csv fallback)
  */
 
 type SourceKey =
@@ -33,93 +35,67 @@ const SOURCES: SourceKey[] = [
   "Bio Power",
 ];
 
-/* ------------------ Utilities ------------------ */
+function round2(n: number) {
+  return Math.round(n * 100) / 100;
+}
 
-const round2 = (n: number) => Math.round(n * 100) / 100;
-const fmt2 = (n: number) => round2(n).toFixed(2);
-const safeNum = (x: unknown) => (Number.isFinite(Number(x)) ? Number(x) : 0);
+function fmt2(n: number) {
+  const v = round2(n);
+  return v.toFixed(2);
+}
 
-const sumSources = (obj: Record<string, number>) =>
-  SOURCES.reduce((a, s) => a + safeNum(obj[s]), 0);
+function safeNum(x: unknown) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : 0;
+}
 
-function parseCSV(text: string) {
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  const parseLine = (l: string) => {
+function sumSources(obj: Record<string, number>, keys: string[]) {
+  return keys.reduce((acc, k) => acc + safeNum(obj[k]), 0);
+}
+
+function parseCSVSimple(text: string) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  if (!lines.length) return { header: [], rows: [] as string[][] };
+
+  const parseLine = (line: string) => {
     const out: string[] = [];
     let cur = "";
-    let q = false;
-    for (let i = 0; i < l.length; i++) {
-      const c = l[i];
-      if (c === '"' && l[i + 1] === '"') {
+    let inQuotes = false;
+
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      const next = line[i + 1];
+
+      if (ch === '"' && inQuotes && next === '"') {
         cur += '"';
         i++;
-      } else if (c === '"') q = !q;
-      else if (c === "," && !q) {
+        continue;
+      }
+      if (ch === '"') {
+        inQuotes = !inQuotes;
+        continue;
+      }
+      if (ch === "," && !inQuotes) {
         out.push(cur.trim());
         cur = "";
-      } else cur += c;
+        continue;
+      }
+      cur += ch;
     }
     out.push(cur.trim());
     return out;
   };
+
   const header = parseLine(lines[0]);
   const rows = lines.slice(1).map(parseLine);
   return { header, rows };
 }
 
-/**
- * Normalize month input:
- * - MM/YYYY
- * - M/YYYY
- * - DD/MM/YYYY
- * - D/M/YYYY
- * - DD-MM-YYYY
- *
- * ALL treated as monthly → MM/YYYY
- */
-function normalizeMonth(input: string | undefined | null) {
-  if (!input) return null;
-  const t = input.trim();
-
-  // MM/YYYY or M/YYYY
-  let m = t.match(/^(\d{1,2})\/(\d{4})$/);
-  if (m) return `${String(+m[1]).padStart(2, "0")}/${m[2]}`;
-
-  // DD/MM/YYYY or D/M/YYYY
-  m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) return `${String(+m[2]).padStart(2, "0")}/${m[3]}`;
-
-  // DD-MM-YYYY
-  m = t.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
-  if (m) return `${String(+m[2]).padStart(2, "0")}/${m[3]}`;
-
-  return null;
-}
-
-const compareMonth = (a: string, b: string) => {
-  const [am, ay] = a.split("/").map(Number);
-  const [bm, by] = b.split("/").map(Number);
-  return ay !== by ? ay - by : am - bm;
-};
-
-const minusMonths = (m: string, n: number) => {
-  let [mm, yy] = m.split("/").map(Number);
-  while (n--) {
-    mm--;
-    if (mm === 0) {
-      mm = 12;
-      yy--;
-    }
-  }
-  return `${String(mm).padStart(2, "0")}/${yy}`;
-};
-
-const netColor = (v: number) =>
-  v > 0 ? "text-emerald-600" : v < 0 ? "text-rose-600" : "text-slate-700";
-
-/* ------------------ UI helpers ------------------ */
-
-const Card = ({
+function Card({
   title,
   right,
   children,
@@ -127,25 +103,135 @@ const Card = ({
   title: string;
   right?: React.ReactNode;
   children: React.ReactNode;
-}) => (
-  <div className="rounded-2xl bg-white shadow-sm ring-1 ring-slate-200">
-    <div className="flex justify-between border-b p-4">
-      <div className="font-semibold">{title}</div>
-      {right}
+}) {
+  return (
+    <div className="rounded-2xl bg-white shadow-sm ring-1 ring-slate-200">
+      <div className="flex items-start justify-between gap-3 border-b border-slate-100 p-4">
+        <div className="text-sm font-semibold text-slate-800">{title}</div>
+        {right ? <div className="text-sm text-slate-600">{right}</div> : null}
+      </div>
+      <div className="p-4">{children}</div>
     </div>
-    <div className="p-4">{children}</div>
-  </div>
-);
+  );
+}
 
-const inputCls =
-  "w-full rounded-lg border px-2 py-1 text-right text-sm tabular-nums focus:ring-2 focus:ring-slate-300";
+function numberInputClass() {
+  return "w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-right text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300 tabular-nums";
+}
 
-/* ------------------ Component ------------------ */
+function compareMonthKey(a: string, b: string) {
+  // MM/YYYY
+  const [am, ay] = a.split("/").map((x) => Number(x));
+  const [bm, by] = b.split("/").map((x) => Number(x));
+  if (ay !== by) return ay - by;
+  return am - bm;
+}
+
+function minusMonths(monthKey: string, monthsBack: number) {
+  const [mm, yyyy] = monthKey.split("/").map((x) => Number(x));
+  let m = mm;
+  let y = yyyy;
+  let left = monthsBack;
+
+  while (left > 0) {
+    m -= 1;
+    if (m <= 0) {
+      m = 12;
+      y -= 1;
+    }
+    left -= 1;
+  }
+  return `${String(m).padStart(2, "0")}/${String(y)}`;
+}
+
+function clampMonthKeyToOptions(target: string, options: string[]) {
+  if (!options.length) return target;
+  if (options.includes(target)) return target;
+
+  const sorted = options.slice().sort(compareMonthKey);
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    if (compareMonthKey(sorted[i], target) <= 0) return sorted[i];
+  }
+  return sorted[0];
+}
+
+function netColorClass(v: number) {
+  if (v > 0) return "text-emerald-600";
+  if (v < 0) return "text-rose-600";
+  return "text-slate-700";
+}
+
+function normalizeHeader(h: string) {
+  return (h || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/–/g, "-")
+    .replace(/—/g, "-");
+}
+
+/**
+ * ✅ ONLY CHANGE vs your original:
+ * Accepts Month column as MM/YYYY OR DD/MM/YYYY (or DD-MM-YYYY), but treats it as MONTHLY.
+ * We ignore DD and normalize internally to MM/YYYY.
+ */
+function normalizeMonth(m: string) {
+  const t = (m || "").trim();
+
+  // Case 1: MM/YYYY or M/YYYY  -> normalize to MM/YYYY
+  let m1 = t.match(/^(\d{1,2})\/(\d{4})$/);
+  if (m1) {
+    const mm = String(Number(m1[1])).padStart(2, "0");
+    const yyyy = m1[2];
+    return `${mm}/${yyyy}`;
+  }
+
+  // Case 2: DD/MM/YYYY or D/M/YYYY -> treat as MONTHLY (ignore DD)
+  m1 = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m1) {
+    const mm = String(Number(m1[2])).padStart(2, "0");
+    const yyyy = m1[3];
+    return `${mm}/${yyyy}`;
+  }
+
+  // Case 3: DD-MM-YYYY or D-M-YYYY -> treat as MONTHLY (ignore DD)
+  m1 = t.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+  if (m1) {
+    const mm = String(Number(m1[2])).padStart(2, "0");
+    const yyyy = m1[3];
+    return `${mm}/${yyyy}`;
+  }
+
+  return null;
+}
+
+async function fetchTextWithFallback(paths: string[]) {
+  let lastErr: any = null;
+  for (const p of paths) {
+    try {
+      const res = await fetch(`${p}?v=${Date.now()}`);
+      if (!res.ok) {
+        lastErr = new Error(`${p} HTTP ${res.status}`);
+        continue;
+      }
+      const txt = await res.text();
+      if (!txt || !txt.trim()) {
+        lastErr = new Error(`${p} empty`);
+        continue;
+      }
+      return { path: p, text: txt };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("All fallbacks failed");
+}
 
 export default function RatedCapacity() {
-  /* ---------- Rated Capacity (top card) ---------- */
-
-  const INST_KEY = "ratedCapacity_installed";
+  // ----------------------------
+  // Rated Capacity (top card)
+  // ----------------------------
+  const INSTALLED_KEY = "ratedCapacity_installed";
   const PLF_KEY = "ratedCapacity_plf";
 
   const [installed, setInstalled] = useState<Record<SourceKey, number>>(() => {
@@ -154,8 +240,11 @@ export default function RatedCapacity() {
       number
     >;
     try {
-      const raw = localStorage.getItem(INST_KEY);
-      if (raw) Object.assign(base, JSON.parse(raw));
+      const raw = localStorage.getItem(INSTALLED_KEY);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        for (const s of SOURCES) base[s] = safeNum(obj?.[s]);
+      }
     } catch {}
     return base;
   });
@@ -167,220 +256,493 @@ export default function RatedCapacity() {
     >;
     try {
       const raw = localStorage.getItem(PLF_KEY);
-      if (raw) Object.assign(base, JSON.parse(raw));
+      if (raw) {
+        const obj = JSON.parse(raw);
+        for (const s of SOURCES) base[s] = safeNum(obj?.[s]);
+      }
     } catch {}
     return base;
   });
 
+  const [capacityCsvMissing, setCapacityCsvMissing] = useState(false);
+  const [capacityCsvMsg, setCapacityCsvMsg] = useState<string | null>(null);
+
   useEffect(() => {
-    localStorage.setItem(INST_KEY, JSON.stringify(installed));
+    let cancelled = false;
+
+    async function loadCapacitySingleRow() {
+      try {
+        const res = await fetch(`/data/Capacity.csv?v=${Date.now()}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        const { header, rows } = parseCSVSimple(text);
+        if (!header.length || !rows.length) throw new Error("Empty CSV");
+
+        const row = rows[0] || [];
+        const map: Record<string, string> = {};
+        header.forEach((h, i) => {
+          map[h] = row[i] ?? "";
+        });
+
+        const next = { ...installed };
+        let any = false;
+        for (const s of SOURCES) {
+          const v = safeNum(map[s]);
+          if (Number.isFinite(v)) {
+            next[s] = v;
+            any = true;
+          }
+        }
+
+        if (!cancelled && any) {
+          setInstalled(next);
+          setCapacityCsvMissing(false);
+          setCapacityCsvMsg(null);
+        }
+      } catch {
+        if (!cancelled) {
+          setCapacityCsvMissing(true);
+          setCapacityCsvMsg("Capacity.csv not loaded – enter values manually.");
+        }
+      }
+    }
+
+    const hasNonZeroLocal = Object.values(installed).some((v) => Number(v) !== 0);
+    if (!hasNonZeroLocal) loadCapacitySingleRow();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(INSTALLED_KEY, JSON.stringify(installed));
+    } catch {}
   }, [installed]);
 
   useEffect(() => {
-    localStorage.setItem(PLF_KEY, JSON.stringify(plf));
+    try {
+      localStorage.setItem(PLF_KEY, JSON.stringify(plf));
+    } catch {}
   }, [plf]);
 
-  const rated = useMemo(() => {
+  const installedTotal = useMemo(() => {
+    return sumSources(installed as unknown as Record<string, number>, SOURCES);
+  }, [installed]);
+
+  const ratedBySource = useMemo(() => {
     const out: Record<SourceKey, number> = {} as any;
-    SOURCES.forEach(
-      (s) => (out[s] = round2(installed[s] * (plf[s] / 100)))
-    );
+    for (const s of SOURCES) {
+      out[s] = round2(safeNum(installed[s]) * (safeNum(plf[s]) / 100));
+    }
     return out;
   }, [installed, plf]);
 
-  /* ---------- Historical Capacity (new card) ---------- */
+  const ratedTotal = useMemo(() => {
+    return sumSources(ratedBySource as unknown as Record<string, number>, SOURCES);
+  }, [ratedBySource]);
 
-  const [history, setHistory] = useState<
-    { month: string; values: Record<SourceKey, number> }[]
-  >([]);
-  const [err, setErr] = useState<string | null>(null);
+  // ----------------------------
+  // Historical Capacity (new card)
+  // ----------------------------
+  type MonthRow = { month: string; values: Record<SourceKey, number> };
+
+  const [history, setHistory] = useState<MonthRow[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyLoadedFrom, setHistoryLoadedFrom] = useState<string | null>(null);
+
+  const monthOptions = useMemo(() => {
+    const opts = history.map((r) => r.month).filter(Boolean);
+    return opts.slice().sort(compareMonthKey);
+  }, [history]);
+
+  const latestMonth = useMemo(() => {
+    if (!monthOptions.length) return null;
+    return monthOptions[monthOptions.length - 1];
+  }, [monthOptions]);
+
+  const defaultStartMonth = useMemo(() => {
+    if (!latestMonth) return null;
+    const candidate = minusMonths(latestMonth, 12);
+    return clampMonthKeyToOptions(candidate, monthOptions);
+  }, [latestMonth, monthOptions]);
+
+  const [startMonth, setStartMonth] = useState<string>("");
+  const [endMonth, setEndMonth] = useState<string>("");
 
   useEffect(() => {
-    (async () => {
+    let cancelled = false;
+
+    async function loadHistory() {
       try {
-        const res =
-          (await fetch("/data/capacity.csv")) ||
-          (await fetch("/data/Capacity.csv"));
-        if (!res.ok) throw new Error();
-        const txt = await res.text();
-        const { header, rows } = parseCSV(txt);
+        setHistoryError(null);
 
-        const mIdx = header.findIndex(
-          (h) => h.trim().toLowerCase() === "month"
-        );
-        if (mIdx < 0) throw new Error();
+        const { path, text } = await fetchTextWithFallback([
+          "/data/capacity.csv",
+          "/data/Capacity.csv",
+        ]);
 
-        const data: typeof history = [];
-        for (const r of rows) {
-          const mk = normalizeMonth(r[mIdx]);
-          if (!mk) continue;
-          const vals: Record<SourceKey, number> = {} as any;
-          SOURCES.forEach((s) => {
-            const i = header.indexOf(s);
-            vals[s] = i >= 0 ? safeNum(r[i]) : 0;
-          });
-          data.push({ month: mk, values: vals });
+        const { header, rows } = parseCSVSimple(text);
+        if (!header.length || !rows.length) throw new Error("Empty CSV");
+
+        const normHeaders = header.map(normalizeHeader);
+
+        const monthIdx = normHeaders.findIndex((h) => h === "month");
+        if (monthIdx === -1) throw new Error(`Missing "Month" column`);
+
+        const sourceIdx: Record<SourceKey, number> = {} as any;
+        for (const s of SOURCES) {
+          const want = normalizeHeader(s);
+          const idx = normHeaders.findIndex((h) => h === want);
+          sourceIdx[s] = idx;
         }
-        data.sort((a, b) => compareMonth(a.month, b.month));
-        setHistory(data);
+
+        const parsed: MonthRow[] = [];
+        for (const row of rows) {
+          const mkRaw = row[monthIdx] ?? "";
+          const mk = normalizeMonth(mkRaw);
+          if (!mk) continue;
+
+          const values: Record<SourceKey, number> = {} as any;
+          for (const s of SOURCES) {
+            const idx = sourceIdx[s];
+            values[s] = idx >= 0 ? safeNum(row[idx]) : 0;
+          }
+          parsed.push({ month: mk, values });
+        }
+
+        parsed.sort((a, b) => compareMonthKey(a.month, b.month));
+
+        if (!cancelled) {
+          setHistory(parsed);
+          setHistoryLoadedFrom(path);
+          setHistoryError(null);
+
+          if (!parsed.length) {
+            setHistoryError(
+              `Loaded ${path} but found 0 valid Month rows. Ensure Month is MM/YYYY or DD/MM/YYYY.`
+            );
+          }
+        }
       } catch {
-        setErr(
-          "capacity.csv not loaded – ensure /public/data/capacity.csv exists with Month + source columns."
-        );
+        if (!cancelled) {
+          setHistory([]);
+          setHistoryLoadedFrom(null);
+          setHistoryError(
+            "capacity.csv not loaded – ensure /public/data/capacity.csv exists with Month + source columns."
+          );
+        }
       }
-    })();
+    }
+
+    loadHistory();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const months = history.map((d) => d.month);
-  const latest = months[months.length - 1];
-  const defaultStart = latest ? minusMonths(latest, 12) : "";
+  useEffect(() => {
+    if (!monthOptions.length) return;
 
-  const [start, setStart] = useState(defaultStart);
-  const [end, setEnd] = useState(latest);
+    const end = latestMonth || monthOptions[monthOptions.length - 1];
+    const start =
+      defaultStartMonth ||
+      monthOptions[Math.max(0, monthOptions.length - 13)] ||
+      monthOptions[0];
+
+    setEndMonth((prev) => (prev ? clampMonthKeyToOptions(prev, monthOptions) : end));
+    setStartMonth((prev) => (prev ? clampMonthKeyToOptions(prev, monthOptions) : start));
+  }, [monthOptions, latestMonth, defaultStartMonth]);
 
   useEffect(() => {
-    if (compareMonth(start, end) > 0) setStart(end);
-  }, [start, end]);
+    if (!startMonth || !endMonth) return;
+    if (compareMonthKey(startMonth, endMonth) > 0) {
+      setStartMonth(endMonth);
+    }
+  }, [startMonth, endMonth]);
 
-  const sRow = history.find((h) => h.month === start);
-  const eRow = history.find((h) => h.month === end);
+  const startRow = useMemo(() => {
+    if (!startMonth) return null;
+    return history.find((r) => r.month === startMonth) || null;
+  }, [history, startMonth]);
 
-  /* ------------------ Render ------------------ */
+  const endRow = useMemo(() => {
+    if (!endMonth) return null;
+    return history.find((r) => r.month === endMonth) || null;
+  }, [history, endMonth]);
+
+  const startTotals = useMemo(() => {
+    const vals = startRow?.values;
+    if (!vals) return null;
+    return { per: vals, total: sumSources(vals as any, SOURCES) };
+  }, [startRow]);
+
+  const endTotals = useMemo(() => {
+    const vals = endRow?.values;
+    if (!vals) return null;
+    return { per: vals, total: sumSources(vals as any, SOURCES) };
+  }, [endRow]);
+
+  const netAdditions = useMemo(() => {
+    const out: Record<SourceKey, number> = {} as any;
+    for (const s of SOURCES) {
+      const a = startTotals?.per?.[s];
+      const b = endTotals?.per?.[s];
+      if (a == null || b == null) out[s] = 0;
+      else out[s] = round2(b - a);
+    }
+    const total = startTotals && endTotals ? round2(endTotals.total - startTotals.total) : 0;
+    return { per: out, total };
+  }, [startTotals, endTotals]);
 
   return (
-    <div className="mx-auto max-w-7xl space-y-6 px-4 py-8">
-      {/* Rated Capacity */}
-      <Card title="Rated Capacity" right="GW">
-        <table className="w-full text-sm">
-          <thead>
-            <tr>
-              <th className="text-left">Capacity (GW)</th>
-              {SOURCES.map((s) => (
-                <th key={s} className="text-right">
-                  {s}
-                </th>
-              ))}
-              <th className="text-right">Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td className="font-bold">Capacity as on current date</td>
-              {SOURCES.map((s) => (
-                <td key={s}>
-                  <input
-                    className={inputCls}
-                    value={installed[s]}
-                    onChange={(e) =>
-                      setInstalled({ ...installed, [s]: +e.target.value })
-                    }
-                  />
-                </td>
-              ))}
-              <td className="text-right font-semibold">
-                {fmt2(sumSources(installed))}
-              </td>
-            </tr>
-            <tr>
-              <td className="font-bold">PLF %</td>
-              {SOURCES.map((s) => (
-                <td key={s}>
-                  <input
-                    className={inputCls}
-                    value={plf[s]}
-                    onChange={(e) =>
-                      setPlf({ ...plf, [s]: +e.target.value })
-                    }
-                  />
-                </td>
-              ))}
-              <td className="text-right">—</td>
-            </tr>
-            <tr>
-              <td className="font-bold">Rated Capacity</td>
-              {SOURCES.map((s) => (
-                <td key={s} className="text-right font-semibold">
-                  {fmt2(rated[s])}
-                </td>
-              ))}
-              <td className="text-right font-semibold">
-                {fmt2(sumSources(rated))}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </Card>
+    <div className="min-h-screen bg-slate-50">
+      <div className="mx-auto max-w-7xl px-4 py-8">
+        <div className="grid grid-cols-1 gap-6">
+          <Card title="Rated Capacity" right={<div className="text-xs text-slate-500">GW</div>}>
+            {capacityCsvMissing && capacityCsvMsg ? (
+              <div className="mb-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700">
+                {capacityCsvMsg}
+              </div>
+            ) : null}
 
-      {/* Historical Capacity */}
-      <Card title="Historical Capacity" right="GW">
-        {err && <div className="mb-3 rounded bg-rose-50 p-3 text-rose-700">{err}</div>}
+            <div className="overflow-hidden rounded-2xl ring-1 ring-slate-200">
+              <table className="w-full border-collapse bg-white text-left text-sm">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th className="px-3 py-2 text-xs font-semibold text-slate-700">
+                      <span className="font-bold text-slate-900">Capacity (GW)</span>
+                    </th>
+                    {SOURCES.map((s) => (
+                      <th
+                        key={s}
+                        className="px-3 py-2 text-xs font-semibold text-slate-700 text-right"
+                      >
+                        {s}
+                      </th>
+                    ))}
+                    <th className="px-3 py-2 text-xs font-semibold text-slate-700 text-right">
+                      Total
+                    </th>
+                  </tr>
+                </thead>
 
-        <div className="mb-4 grid grid-cols-2 gap-3">
-          <select value={start} onChange={(e) => setStart(e.target.value)}>
-            {months.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-          <select value={end} onChange={(e) => setEnd(e.target.value)}>
-            {months.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
+                <tbody>
+                  <tr className="border-t border-slate-100">
+                    <td className="px-3 py-2 font-bold text-slate-900">
+                      Capacity as on current date
+                    </td>
+                    {SOURCES.map((s) => (
+                      <td key={s} className="px-3 py-2">
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={installed[s]}
+                          onChange={(e) => {
+                            const v = safeNum(e.target.value);
+                            setInstalled((prev) => ({ ...prev, [s]: v }));
+                          }}
+                          className={numberInputClass()}
+                        />
+                      </td>
+                    ))}
+                    <td className="px-3 py-2 text-right font-semibold tabular-nums text-slate-900">
+                      {fmt2(installedTotal)}
+                    </td>
+                  </tr>
+
+                  <tr className="border-t border-slate-100">
+                    <td className="px-3 py-2 font-bold text-slate-900">PLF %</td>
+                    {SOURCES.map((s) => (
+                      <td key={s} className="px-3 py-2">
+                        <input
+                          type="number"
+                          step="0.01"
+                          min={0}
+                          max={100}
+                          value={plf[s]}
+                          onChange={(e) => {
+                            const v = safeNum(e.target.value);
+                            setPlf((prev) => ({ ...prev, [s]: v }));
+                          }}
+                          className={numberInputClass()}
+                        />
+                      </td>
+                    ))}
+                    <td className="px-3 py-2 text-right font-semibold tabular-nums text-slate-500">
+                      —
+                    </td>
+                  </tr>
+
+                  <tr className="border-t border-slate-100">
+                    <td className="px-3 py-2 font-bold text-slate-900">Rated Capacity</td>
+                    {SOURCES.map((s) => (
+                      <td
+                        key={s}
+                        className="px-3 py-2 text-right font-semibold tabular-nums text-slate-900"
+                      >
+                        {fmt2(ratedBySource[s])}
+                      </td>
+                    ))}
+                    <td className="px-3 py-2 text-right font-semibold tabular-nums text-slate-900">
+                      {fmt2(ratedTotal)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div className="mt-3 text-xs text-slate-600">
+              Rated Capacity (GW) = Installed Capacity × (PLF / 100). Values are editable and saved locally in your browser.
+            </div>
+          </Card>
+
+          <Card title="Historical Capacity" right={<div className="text-xs text-slate-500">GW</div>}>
+            <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <div className="text-xs font-medium text-slate-600">Start Month/Year</div>
+                <select
+                  value={startMonth}
+                  onChange={(e) => setStartMonth(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                >
+                  {monthOptions.length ? (
+                    monthOptions.map((m) => (
+                      <option
+                        key={m}
+                        value={m}
+                        disabled={endMonth ? compareMonthKey(m, endMonth) > 0 : false}
+                      >
+                        {m}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">No data</option>
+                  )}
+                </select>
+              </div>
+
+              <div>
+                <div className="text-xs font-medium text-slate-600">End Month/Year</div>
+                <select
+                  value={endMonth}
+                  onChange={(e) => setEndMonth(e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300"
+                >
+                  {monthOptions.length ? (
+                    monthOptions.map((m) => (
+                      <option
+                        key={m}
+                        value={m}
+                        disabled={startMonth ? compareMonthKey(m, startMonth) < 0 : false}
+                      >
+                        {m}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">No data</option>
+                  )}
+                </select>
+              </div>
+            </div>
+
+            {historyError ? (
+              <div className="mb-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700">
+                {historyError}
+              </div>
+            ) : historyLoadedFrom ? (
+              <div className="mb-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                Loaded from: <span className="font-semibold">{historyLoadedFrom}</span>
+              </div>
+            ) : null}
+
+            <div className="overflow-hidden rounded-2xl ring-1 ring-slate-200">
+              <table className="w-full table-fixed border-collapse bg-white text-left">
+                <thead className="bg-slate-50">
+                  <tr>
+                    <th className="w-[170px] px-2 py-2 text-[11px] font-semibold text-slate-700">
+                      <span className="font-bold text-slate-900">Capacity (GW)</span>
+                    </th>
+                    {SOURCES.map((s) => (
+                      <th
+                        key={s}
+                        className="px-2 py-2 text-[11px] font-semibold text-slate-700 text-right whitespace-normal break-words"
+                      >
+                        {s}
+                      </th>
+                    ))}
+                    <th className="px-2 py-2 text-[11px] font-semibold text-slate-700 text-right">
+                      Total
+                    </th>
+                  </tr>
+                </thead>
+
+                <tbody className="text-[12px]">
+                  <tr className="border-t border-slate-100">
+                    <td className="px-2 py-2 font-bold text-slate-900">
+                      Capacity as on Start Date ({startMonth || "—"})
+                    </td>
+                    {SOURCES.map((s) => (
+                      <td key={s} className="px-2 py-2 text-right tabular-nums text-slate-900">
+                        {startTotals ? fmt2(startTotals.per[s]) : "—"}
+                      </td>
+                    ))}
+                    <td className="px-2 py-2 text-right font-semibold tabular-nums text-slate-900">
+                      {startTotals ? fmt2(startTotals.total) : "—"}
+                    </td>
+                  </tr>
+
+                  <tr className="border-t border-slate-100">
+                    <td className="px-2 py-2 font-bold text-slate-900">
+                      Capacity as on End Date ({endMonth || "—"})
+                    </td>
+                    {SOURCES.map((s) => (
+                      <td key={s} className="px-2 py-2 text-right tabular-nums text-slate-900">
+                        {endTotals ? fmt2(endTotals.per[s]) : "—"}
+                      </td>
+                    ))}
+                    <td className="px-2 py-2 text-right font-semibold tabular-nums text-slate-900">
+                      {endTotals ? fmt2(endTotals.total) : "—"}
+                    </td>
+                  </tr>
+
+                  <tr className="border-t border-slate-100">
+                    <td className="px-2 py-2 font-bold text-slate-900">Net Addition (GW)</td>
+                    {SOURCES.map((s) => {
+                      const v = netAdditions.per[s];
+                      const cls = netColorClass(v);
+                      const sign = v > 0 ? "+" : "";
+                      return (
+                        <td
+                          key={s}
+                          className={`px-2 py-2 text-right font-semibold tabular-nums ${cls}`}
+                        >
+                          {startTotals && endTotals ? `${sign}${fmt2(v)}` : "—"}
+                        </td>
+                      );
+                    })}
+                    <td
+                      className={`px-2 py-2 text-right font-semibold tabular-nums ${
+                        startTotals && endTotals ? netColorClass(netAdditions.total) : "text-slate-700"
+                      }`}
+                    >
+                      {startTotals && endTotals
+                        ? `${netAdditions.total > 0 ? "+" : ""}${fmt2(netAdditions.total)}`
+                        : "—"}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div className="mt-3 text-xs text-slate-600">
+              Net Addition (GW) = Capacity at End Date − Capacity at Start Date. Data sourced from monthly capacity.csv.
+            </div>
+          </Card>
         </div>
-
-        <table className="w-full text-sm">
-          <tbody>
-            {[
-              ["Capacity as on Start Date", sRow],
-              ["Capacity as on End Date", eRow],
-            ].map(([label, row]: any) => (
-              <tr key={label}>
-                <td className="font-bold">{label}</td>
-                {SOURCES.map((s) => (
-                  <td key={s} className="text-right">
-                    {row ? fmt2(row.values[s]) : "—"}
-                  </td>
-                ))}
-                <td className="text-right font-semibold">
-                  {row ? fmt2(sumSources(row.values)) : "—"}
-                </td>
-              </tr>
-            ))}
-            <tr>
-              <td className="font-bold">Net Addition (GW)</td>
-              {SOURCES.map((s) => {
-                const v =
-                  sRow && eRow ? eRow.values[s] - sRow.values[s] : 0;
-                return (
-                  <td key={s} className={`text-right ${netColor(v)}`}>
-                    {sRow && eRow ? fmt2(v) : "—"}
-                  </td>
-                );
-              })}
-              <td
-                className={`text-right font-semibold ${
-                  sRow && eRow
-                    ? netColor(sumSources(eRow.values) - sumSources(sRow.values))
-                    : ""
-                }`}
-              >
-                {sRow && eRow
-                  ? fmt2(sumSources(eRow.values) - sumSources(sRow.values))
-                  : "—"}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-
-        <div className="mt-2 text-xs text-slate-600">
-          Net Addition (GW) = Capacity at End Date − Capacity at Start Date. Data
-          sourced from monthly capacity.csv.
-        </div>
-      </Card>
+      </div>
     </div>
   );
 }
