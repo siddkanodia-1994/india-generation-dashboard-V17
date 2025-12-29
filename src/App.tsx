@@ -26,7 +26,7 @@ export default function App() {
           </div>
 
           {/* ===========================
-              Generation (SUB-TABS)
+              Generation (WITH SUB-TABS)
               =========================== */}
           <TabPanel>
             <Tabs>
@@ -34,7 +34,7 @@ export default function App() {
                 <TabList>
                   {/* 🔁 LABEL CHANGES ONLY */}
                   <Tab>Total</Tab>
-                  <Tab>Thermal</Tab>
+                  <Tab>Thermal (incl. Large Hydro)</Tab>
                   <Tab>Renewable</Tab>
                 </TabList>
               </div>
@@ -58,7 +58,7 @@ export default function App() {
                 />
               </TabPanel>
 
-              {/* Thermal = coal (LABEL ONLY CHANGED) */}
+              {/* Thermal (incl. Large Hydro) = coal */}
               <TabPanel>
                 <ElectricityDashboard
                   type="generation-coal"
